@@ -132,6 +132,18 @@ typedef struct {
     uint8_t  max_speed_10mm;    ///< Cruise speed as advertised, in units of 10 mm/s
 } db_control_report_t;
 
+/// What the last tick with staged floor lines did with them, and the fix it took
+typedef struct {
+    uint8_t count;                                ///< lines fused
+    uint8_t station_sweep[DB_CONTROL_LINES_MAX];  ///< lh_index << 1 | sweep, per line
+    uint8_t result[DB_CONTROL_LINES_MAX];         ///< db_pose_estimator_result_t, per line
+    float   innovation_mm[DB_CONTROL_LINES_MAX];  ///< signed innovation, NaN when the line was not gated
+    float   fix_x;                                ///< photodiode of the tick's fix, mm, when fix_valid
+    float   fix_y;                                ///< photodiode of the tick's fix, mm, when fix_valid
+    bool    fix_valid;                            ///< a fix in bounds came out of the tick
+    bool    fix_from_lines;                       ///< the fix is the lines' intersection, else the input's solve
+} db_control_fusion_record_t;
+
 /// One robot's control state
 typedef struct {
     const db_control_conf_t   *conf;                         ///< gains, not owned
@@ -166,6 +178,7 @@ typedef struct {
     int8_t                     pwm_right;                    ///< last duty written, 0 while braked
     bool                       brake_left;                   ///< last brake written
     bool                       brake_right;                  ///< last brake written
+    db_control_fusion_record_t last_fusion;                  ///< the last tick that had floor lines staged
 } db_control_t;
 
 /// The DotBot v3 gains and limits the app runs with

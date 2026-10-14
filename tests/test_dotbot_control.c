@@ -782,6 +782,46 @@ static void test_fix_leaves_out_a_rejected_station(void) {
     CHECK(s.control.fusion.station[1].rejected > 0 && s.control.fusion.station[1].accepted == 0, "bad station: its lines are gated out, %u rejected", s.control.fusion.station[1].rejected);
     CHECK(est->kidnaps == 0 && est->status == DB_POSE_ESTIMATOR_TRACKING && est->rejected == 0, "bad station: the fix from the good one is no kidnap, %u kidnaps, %u fixes rejected", est->kidnaps, est->rejected);
     CHECK(hypotf((float)s.control.position_x - s.plant.px[PLANT_FIX_AGE], (float)s.control.position_y - s.plant.py[PLANT_FIX_AGE]) <= 1.0f, "bad station: the fix is the good station's point");
+
+    // The record names each line's station, sweep, result and innovation
+    const db_control_fusion_record_t *r = &s.control.last_fusion;
+    CHECK(r->count == 4 && r->station_sweep[0] == 0 && r->station_sweep[1] == 1 && r->station_sweep[2] == 2 && r->station_sweep[3] == 3, "record: four lines, station << 1 | sweep, count %u", r->count);
+    CHECK(r->result[0] == DB_POSE_ESTIMATOR_ACCEPTED && r->result[1] == DB_POSE_ESTIMATOR_ACCEPTED && r->result[2] == DB_POSE_ESTIMATOR_REJECTED && r->result[3] == DB_POSE_ESTIMATOR_REJECTED, "record: station 0 accepted, station 1 rejected");
+    CHECK(fabsf(r->innovation_mm[0]) < 1.0f && fabsf(r->innovation_mm[2]) > 10.0f && isfinite(r->innovation_mm[3]), "record: innovations %.1f and %.1f mm", r->innovation_mm[0], r->innovation_mm[2]);
+    CHECK(r->fix_valid && r->fix_from_lines && lroundf(r->fix_x) == (long)s.control.position_x && lroundf(r->fix_y) == (long)s.control.position_y, "record: the fix is the accepted lines' point");
+}
+
+static void test_fusion_record_before_heading_and_on_fallback(void) {
+    sim_t s;
+    _sim_init(&s, 0);
+    for (uint32_t i = 0; i < 20; i++) {
+        db_control_input_t in;
+        _plant_step(&s.plant, &in);
+        if (s.plant.tick % PLANT_FIX_EVERY == 0) {
+            db_lh2_floor_line_t lines[2] = {
+                { .nx = 1, .ny = 0, .d_mm = 500, .var_mm2 = 1, .station = 0, .sweep = 0 },
+                { .nx = 1, .ny = 0.01f, .d_mm = 520, .var_mm2 = 1, .station = 5, .sweep = 1 },
+            };
+            db_control_lines(&s.control, lines, 2);
+        }
+        db_control_tick(&s.control, &in, &s.out);
+    }
+    const db_control_fusion_record_t *r = &s.control.last_fusion;
+    CHECK(r->count == 2 && r->station_sweep[1] == 11, "fallback record: two lines, the second station 5 sweep 1");
+    CHECK(r->result[0] == DB_POSE_ESTIMATOR_REJECTED && isnan(r->innovation_mm[0]) && isnan(r->innovation_mm[1]), "fallback record: not gated with no heading, innovations NaN");
+    CHECK(r->fix_valid && !r->fix_from_lines && r->fix_x == (float)s.plant.fix_x, "fallback record: the input's solve, flagged as such");
+
+    db_lh2_floor_line_t lines[2];
+    _cross(200.0f, 300.0f, 20.0f, 1, lines);
+    db_control_input_t in;
+    _plant_step(&s.plant, &in);
+    db_control_lines(&s.control, lines, 2);
+    db_control_tick(&s.control, &in, &s.out);
+    CHECK(r->fix_from_lines && fabsf(r->fix_x - 200.0f) < 0.01f && fabsf(r->fix_y - 300.0f) < 0.01f, "no heading record: the lines' point, (%.2f, %.2f)", r->fix_x, r->fix_y);
+
+    _plant_step(&s.plant, &in);
+    db_control_tick(&s.control, &in, &s.out);
+    CHECK(r->count == 2 && r->fix_from_lines && fabsf(r->fix_x - 200.0f) < 0.01f, "a tick with no lines leaves the record as it was");
 }
 
 /// A 60 mm drive for a heading, then a stand under two stations 3.7 mm
@@ -857,6 +897,7 @@ int main(void) {
     test_fix_from_every_station_before_heading();
     test_fix_falls_back_without_a_crossing();
     test_fix_leaves_out_a_rejected_station();
+    test_fusion_record_before_heading_and_on_fallback();
     test_station_dark_at_rest_keeps_the_heading();
     printf("dotbot_control: %d passed, %d failed\n", _passed, _failed);
     return _failed ? 1 : 0;

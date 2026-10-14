@@ -396,8 +396,16 @@ void db_control_tick(db_control_t *control, const db_control_input_t *in, db_con
     uint8_t             fix_line_count = 0;
     bool                tracking       = control->estimator.status == DB_POSE_ESTIMATOR_TRACKING;
     bool                lines_accepted = control->line_count > 0;
+    db_control_fusion_record_t *record = &control->last_fusion;
+    if (control->line_count > 0) {
+        record->count = control->line_count;
+    }
     for (uint8_t i = 0; i < control->line_count; i++) {
+        control->estimator.last_innovation_mm = NAN;
         db_pose_estimator_result_t result = db_lh2_fusion_update(&control->fusion, &control->estimator, &control->lines[i]);
+        record->station_sweep[i]          = (uint8_t)((control->lines[i].station << 1) | (control->lines[i].sweep & 1U));
+        record->result[i]                 = (uint8_t)result;
+        record->innovation_mm[i]          = control->estimator.last_innovation_mm;
         if (result != DB_POSE_ESTIMATOR_ACCEPTED) {
             lines_accepted = false;
         }
@@ -408,10 +416,17 @@ void db_control_tick(db_control_t *control, const db_control_input_t *in, db_con
     float fix_x;
     float fix_y;
     bool  fix_valid = db_lh2_fusion_intersect(fix_lines, fix_line_count, &fix_x, &fix_y) && fix_x >= 0 && fix_y >= 0 && fix_x <= POSITION_INVALID_MM && fix_y <= POSITION_INVALID_MM;
+    bool  fix_from_lines = fix_valid;
     if (!fix_valid && in->fix_x <= POSITION_INVALID_MM && in->fix_y <= POSITION_INVALID_MM) {
         fix_x     = (float)in->fix_x;
         fix_y     = (float)in->fix_y;
         fix_valid = true;
+    }
+    if (control->line_count > 0) {
+        record->fix_valid      = fix_valid;
+        record->fix_from_lines = fix_from_lines;
+        record->fix_x          = fix_valid ? fix_x : NAN;
+        record->fix_y          = fix_valid ? fix_y : NAN;
     }
     control->line_count = 0;
     if (lines_accepted) {
