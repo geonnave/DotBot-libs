@@ -784,6 +784,58 @@ static void test_fix_leaves_out_a_rejected_station(void) {
     CHECK(hypotf((float)s.control.position_x - s.plant.px[PLANT_FIX_AGE], (float)s.control.position_y - s.plant.py[PLANT_FIX_AGE]) <= 1.0f, "bad station: the fix is the good station's point");
 }
 
+/// A 60 mm drive for a heading, then a stand under two stations 3.7 mm
+/// apart, station 0 dark for 14 s of it; the heading change over the dark
+/// window, deg. Without lines, the input's solve carries the station in view.
+static float _dark_at_rest_swing(int with_lines) {
+    sim_t s;
+    _sim_init(&s, 0);
+    s.plant.noise_mm = 0;
+    float    start_x = s.plant.x, start_y = s.plant.y, rest_deg = 0;
+    uint32_t stop = 0;
+    for (uint32_t i = 0; i < 3000; i++) {
+        if (stop == 0 && i % 20 == 0) {
+            _send_velocity(&s, 150, 150);
+        }
+        if (stop == 0 && hypotf(s.plant.x - start_x, s.plant.y - start_y) >= 60.0f) {
+            _send_velocity(&s, 0, 0);
+            stop = i;
+        }
+        bool dark = stop > 0 && i >= stop + 1000 && i < stop + 2400;
+        if (stop > 0 && i == stop + 1000) {
+            rest_deg = s.control.estimator.theta * 180.0f / (float)M_PI;
+        }
+        db_control_input_t in;
+        _plant_step(&s.plant, &in);
+        if (s.plant.tick % PLANT_FIX_EVERY == 0) {
+            float tx = s.plant.px[PLANT_FIX_AGE], ty = s.plant.py[PLANT_FIX_AGE];
+            if (with_lines) {
+                db_lh2_floor_line_t lines[4];
+                _cross(tx, ty, 20.0f, 0, &lines[0]);
+                _cross(tx - 2.1f, ty - 3.0f, 65.0f, 1, &lines[2]);
+                db_control_lines(&s.control, dark ? &lines[2] : lines, dark ? 2 : 4);
+            } else if (dark) {
+                in.fix_x = (uint32_t)lroundf(tx - 2.1f);
+                in.fix_y = (uint32_t)lroundf(ty - 3.0f);
+            }
+        }
+        db_control_tick(&s.control, &in, &s.out);
+        _plant_apply(&s.plant, &s.out);
+        if (stop > 0 && i == stop + 2400) {
+            break;
+        }
+    }
+    CHECK(stop > 0 && s.control.estimator.status == DB_POSE_ESTIMATOR_TRACKING, "dark at rest: tracking after the drive");
+    return fabsf(s.control.estimator.theta * 180.0f / (float)M_PI - rest_deg);
+}
+
+static void test_station_dark_at_rest_keeps_the_heading(void) {
+    float swing = _dark_at_rest_swing(1);
+    CHECK(swing < 0.5f, "dark at rest, lines: the heading holds while they shift, swung %.2f deg", swing);
+    swing = _dark_at_rest_swing(0);
+    CHECK(swing < 0.5f, "dark at rest, fixes: the heading holds while they shift, swung %.2f deg", swing);
+}
+
 int main(void) {
     test_batch_seeded();
     test_seed();
@@ -805,6 +857,7 @@ int main(void) {
     test_fix_from_every_station_before_heading();
     test_fix_falls_back_without_a_crossing();
     test_fix_leaves_out_a_rejected_station();
+    test_station_dark_at_rest_keeps_the_heading();
     printf("dotbot_control: %d passed, %d failed\n", _passed, _failed);
     return _failed ? 1 : 0;
 }

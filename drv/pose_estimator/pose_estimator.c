@@ -63,6 +63,17 @@ static void _travel_recent(const db_pose_estimator_t *est, uint32_t age, float *
     *dtheta = est->theta - theta;
 }
 
+/// No wheel count over the whole travel ring: the robot cannot have turned,
+/// so a measurement then moves the position only
+static bool _standing(const db_pose_estimator_t *est) {
+    for (uint32_t i = 0; i < DB_POSE_ESTIMATOR_FIX_AGE_MAX; i++) {
+        if (est->travel.d[i] != 0 || est->travel.dtheta[i] != 0) {
+            return false;
+        }
+    }
+    return true;
+}
+
 /// Moves the pose and its covariance over one odometry step
 static void _propagate(db_pose_estimator_t *est, float d, float dtheta, float q_theta, float q_pos_slip) {
     float mid = est->theta + 0.5f * dtheta;
@@ -366,6 +377,10 @@ static db_pose_estimator_result_t _gated_update(db_pose_estimator_t *est, float 
         k[i][0] = pht[i][0] * i00 + pht[i][1] * i10;
         k[i][1] = pht[i][0] * i01 + pht[i][1] * i11;
     }
+    if (_standing(est)) {
+        k[2][0] = 0;
+        k[2][1] = 0;
+    }
     est->x += k[0][0] * y0 + k[0][1] * y1;
     est->y += k[1][0] * y0 + k[1][1] * y1;
     est->theta = _wrap(est->theta + k[2][0] * y0 + k[2][1] * y1);
@@ -585,7 +600,7 @@ db_pose_estimator_result_t db_pose_estimator_update_line(db_pose_estimator_t *es
         return DB_POSE_ESTIMATOR_REJECTED;
     }
 
-    float k[3] = { ph[0] / s, ph[1] / s, ph[2] / s };
+    float k[3] = { ph[0] / s, ph[1] / s, _standing(est) ? 0 : ph[2] / s };
     est->x += k[0] * innovation;
     est->y += k[1] * innovation;
     est->theta = _wrap(est->theta + k[2] * innovation);
