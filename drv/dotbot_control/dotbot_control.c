@@ -390,11 +390,28 @@ void db_control_tick(db_control_t *control, const db_control_input_t *in, db_con
 
     db_pose_estimator_predict(&control->estimator, in->counts_left, in->counts_right, elapsed);
 
-    bool lines_accepted = control->line_count > 0;
+    // The fix is where the lines meet, those the gate took while tracking,
+    // else the secure side's solve
+    db_lh2_floor_line_t fix_lines[DB_CONTROL_LINES_MAX];
+    uint8_t             fix_line_count = 0;
+    bool                tracking       = control->estimator.status == DB_POSE_ESTIMATOR_TRACKING;
+    bool                lines_accepted = control->line_count > 0;
     for (uint8_t i = 0; i < control->line_count; i++) {
-        if (db_lh2_fusion_update(&control->fusion, &control->estimator, &control->lines[i]) != DB_POSE_ESTIMATOR_ACCEPTED) {
+        db_pose_estimator_result_t result = db_lh2_fusion_update(&control->fusion, &control->estimator, &control->lines[i]);
+        if (result != DB_POSE_ESTIMATOR_ACCEPTED) {
             lines_accepted = false;
         }
+        if (!tracking || result == DB_POSE_ESTIMATOR_ACCEPTED) {
+            fix_lines[fix_line_count++] = control->lines[i];
+        }
+    }
+    float fix_x;
+    float fix_y;
+    bool  fix_valid = db_lh2_fusion_intersect(fix_lines, fix_line_count, &fix_x, &fix_y) && fix_x >= 0 && fix_y >= 0 && fix_x <= POSITION_INVALID_MM && fix_y <= POSITION_INVALID_MM;
+    if (!fix_valid && in->fix_x <= POSITION_INVALID_MM && in->fix_y <= POSITION_INVALID_MM) {
+        fix_x     = (float)in->fix_x;
+        fix_y     = (float)in->fix_y;
+        fix_valid = true;
     }
     control->line_count = 0;
     if (lines_accepted) {
@@ -406,14 +423,14 @@ void db_control_tick(db_control_t *control, const db_control_input_t *in, db_con
     // An unchanged sequence is the previous solve read a second time
     if (_due(&control->tick_position, tick, TICKS_PER_POSITION) && in->fix_sequence != control->fix_sequence) {
         control->fix_sequence = in->fix_sequence;
-        if (in->fix_x <= POSITION_INVALID_MM && in->fix_y <= POSITION_INVALID_MM) {
-            control->position_x   = in->fix_x;
-            control->position_y   = in->fix_y;
+        if (fix_valid) {
+            control->position_x   = (uint32_t)lroundf(fix_x);
+            control->position_y   = (uint32_t)lroundf(fix_y);
             control->has_position = true;
             if (!lines_accepted) {
-                db_pose_estimator_update(&control->estimator, (float)in->fix_x, (float)in->fix_y);
+                db_pose_estimator_update(&control->estimator, fix_x, fix_y);
             }
-            db_steering_fix(&control->steering, (float)in->fix_x, (float)in->fix_y);
+            db_steering_fix(&control->steering, fix_x, fix_y);
         }
     }
 

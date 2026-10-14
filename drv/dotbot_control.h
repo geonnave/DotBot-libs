@@ -222,7 +222,9 @@ bool db_control_fix_due(const db_control_t *control, uint32_t elapsed_ticks);
  * @brief   Stage the LH2 floor lines read with this tick's fix
  *
  * The next db_control_tick() fuses them into the estimator after its predict,
- * while the estimator tracks. When every one is accepted, that tick's fix
+ * while the estimator tracks. That tick's fix is the weighted intersection
+ * (db_lh2_fusion_intersect()) of all of them, or while tracking of those
+ * accepted, else the input's solve. When every line is accepted, the fix
  * feeds the steering and the advertisement but not the estimator, since it
  * comes from the same sweeps; when any is rejected, the fix is used as
  * without lines, so its gate and the kidnap check still see the jump. Lines beyond

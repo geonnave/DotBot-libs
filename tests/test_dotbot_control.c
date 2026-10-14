@@ -686,6 +686,104 @@ static void test_lines_ignored_while_seeding(void) {
     CHECK(s.control.fusion.station[3].accepted == 0 && s.control.fusion.station[3].rejected == 0, "seeding: lines until then are not counted");
 }
 
+/// Two lines through (x, y), crossing at 90 deg with normals turned by angle_deg
+static void _cross(float x, float y, float angle_deg, uint8_t station, db_lh2_floor_line_t out[2]) {
+    float a = angle_deg * (float)M_PI / 180.0f;
+    float c = cosf(a), s = sinf(a);
+    out[0]  = (db_lh2_floor_line_t){ .nx = c, .ny = s, .d_mm = c * x + s * y, .var_mm2 = 1, .station = station, .sweep = 0 };
+    out[1]  = (db_lh2_floor_line_t){ .nx = -s, .ny = c, .d_mm = -s * x + c * y, .var_mm2 = 1, .station = station, .sweep = 1 };
+}
+
+/// Runs a robot at rest with no heading, staging with each new fix station 0's
+/// lines through the truth and station 1's through the truth moved by
+/// (bx, by) when both is set; the input's solve alternates between the two
+/// stations. Returns the largest move of the advertised photodiode between
+/// fixes, and its last offset from the truth.
+static float _rest_no_heading(int both, float bx, float by, float *off_x, float *off_y) {
+    sim_t s;
+    _sim_init(&s, 0);
+    float    worst = 0, prev_x = 0, prev_y = 0;
+    uint32_t fixes = 0;
+    for (uint32_t i = 0; i < 300; i++) {
+        db_control_input_t in;
+        _plant_step(&s.plant, &in);
+        float tx = s.plant.px[0], ty = s.plant.py[0];
+        if (s.plant.tick % PLANT_FIX_EVERY == 0) {
+            db_lh2_floor_line_t lines[4];
+            _cross(tx, ty, 20.0f, 0, &lines[0]);
+            _cross(tx + bx, ty + by, 65.0f, 1, &lines[2]);
+            db_control_lines(&s.control, lines, both ? 4 : 2);
+            int pick_b = both && (s.plant.fix_sequence % 2);
+            in.fix_x   = (uint32_t)lroundf(tx + (pick_b ? bx : 0));
+            in.fix_y   = (uint32_t)lroundf(ty + (pick_b ? by : 0));
+        }
+        db_control_tick(&s.control, &in, &s.out);
+        if (s.plant.tick % PLANT_FIX_EVERY == 0) {
+            db_control_report_t report;
+            db_control_report(&s.control, &report);
+            if (fixes++ > 0) {
+                worst = fmaxf(worst, hypotf((float)report.sensor_x - prev_x, (float)report.sensor_y - prev_y));
+            }
+            prev_x = (float)report.sensor_x;
+            prev_y = (float)report.sensor_y;
+            *off_x = prev_x - tx;
+            *off_y = prev_y - ty;
+        }
+    }
+    CHECK(s.control.estimator.status != DB_POSE_ESTIMATOR_TRACKING, "no heading: the robot at rest never tracks");
+    return worst;
+}
+
+static void test_fix_from_every_station_before_heading(void) {
+    // The stations disagree by 6 mm along x; the secure side's solve hops between them
+    float ox, oy;
+    float step = _rest_no_heading(1, 6.0f, 0, &ox, &oy);
+    CHECK(step <= 1.0f, "no heading, two stations: no hop between fixes, largest step %.1f mm", step);
+    CHECK(fabsf(ox - 3.0f) <= 1.0f && fabsf(oy) <= 1.0f, "no heading, two stations: the fix sits midway, (%.1f, %.1f) mm from station 0", ox, oy);
+    step = _rest_no_heading(0, 0, 0, &ox, &oy);
+    CHECK(step <= 1.0f && hypotf(ox, oy) <= 1.0f, "no heading, one station: its intersection, (%.1f, %.1f) mm off, step %.1f", ox, oy, step);
+}
+
+static void test_fix_falls_back_without_a_crossing(void) {
+    sim_t s;
+    _sim_init(&s, 0);
+    for (uint32_t i = 0; i < 20; i++) {
+        db_control_input_t in;
+        _plant_step(&s.plant, &in);
+        if (s.plant.tick % PLANT_FIX_EVERY == 0) {
+            db_lh2_floor_line_t lines[2] = {
+                { .nx = 1, .ny = 0, .d_mm = 500, .var_mm2 = 1, .station = 0, .sweep = 0 },
+                { .nx = 1, .ny = 0.01f, .d_mm = 520, .var_mm2 = 1, .station = 1, .sweep = 0 },
+            };
+            db_control_lines(&s.control, lines, 2);
+        }
+        db_control_tick(&s.control, &in, &s.out);
+    }
+    CHECK(s.control.has_position && s.control.position_x == s.plant.fix_x && s.control.position_y == s.plant.fix_y, "near-parallel lines: the input's solve is the fix, (%u, %u)", s.control.position_x, s.control.position_y);
+}
+
+static void test_fix_leaves_out_a_rejected_station(void) {
+    // Tracking at rest; station 1's lines are 40 mm off and gated out
+    sim_t s;
+    _sim_init(&s, 1);
+    s.plant.noise_mm = 0;
+    for (uint32_t i = 0; i < 300; i++) {
+        db_control_input_t in;
+        _plant_step(&s.plant, &in);
+        if (s.plant.tick % PLANT_FIX_EVERY == 0) {
+            db_lh2_floor_line_t lines[4];
+            _cross(s.plant.px[PLANT_FIX_AGE], s.plant.py[PLANT_FIX_AGE], 20.0f, 0, &lines[0]);
+            _cross(s.plant.px[PLANT_FIX_AGE] + 40.0f, s.plant.py[PLANT_FIX_AGE], 65.0f, 1, &lines[2]);
+            db_control_lines(&s.control, lines, 4);
+        }
+        db_control_tick(&s.control, &in, &s.out);
+    }
+    const db_pose_estimator_t *est = &s.control.estimator;
+    CHECK(s.control.fusion.station[1].rejected > 0 && s.control.fusion.station[1].accepted == 0, "bad station: its lines are gated out, %u rejected", s.control.fusion.station[1].rejected);
+    CHECK(est->kidnaps == 0 && est->status == DB_POSE_ESTIMATOR_TRACKING && est->rejected == 0, "bad station: the fix from the good one is no kidnap, %u kidnaps, %u fixes rejected", est->kidnaps, est->rejected);
+    CHECK(hypotf((float)s.control.position_x - s.plant.px[PLANT_FIX_AGE], (float)s.control.position_y - s.plant.py[PLANT_FIX_AGE]) <= 1.0f, "bad station: the fix is the good station's point");
+}
+
 int main(void) {
     test_batch_seeded();
     test_seed();
@@ -704,6 +802,9 @@ int main(void) {
     test_lines_ignored_while_seeding();
     test_lines_keep_the_kidnap_check();
     test_lines_clear_a_building_kidnap();
+    test_fix_from_every_station_before_heading();
+    test_fix_falls_back_without_a_crossing();
+    test_fix_leaves_out_a_rejected_station();
     printf("dotbot_control: %d passed, %d failed\n", _passed, _failed);
     return _failed ? 1 : 0;
 }
