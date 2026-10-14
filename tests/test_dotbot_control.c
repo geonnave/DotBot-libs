@@ -876,6 +876,43 @@ static void test_station_dark_at_rest_keeps_the_heading(void) {
     CHECK(swing < 0.5f, "dark at rest, fixes: the heading holds while they shift, swung %.2f deg", swing);
 }
 
+/// Tracking at rest under stations 0 and 1, station 1 dark for gap_ticks from
+/// tick 1000, then back with its lines 3 mm off; station 1's lines fused in
+/// the window_ticks after it is back
+static uint32_t _station_back_fused(uint32_t gap_ticks, uint32_t window_ticks) {
+    sim_t s;
+    _sim_init(&s, 1);
+    s.plant.noise_mm = 0;
+    uint32_t back = 1000 + gap_ticks, accepted_at_back = 0;
+    for (uint32_t i = 0; i < back + window_ticks; i++) {
+        db_control_input_t in;
+        _plant_step(&s.plant, &in);
+        if (s.plant.tick % PLANT_FIX_EVERY == 0) {
+            float               tx = s.plant.px[PLANT_FIX_AGE], ty = s.plant.py[PLANT_FIX_AGE];
+            db_lh2_floor_line_t lines[4];
+            _cross(tx, ty, 20.0f, 0, &lines[0]);
+            _cross(tx + (i >= back ? 3.0f : 0), ty, 65.0f, 1, &lines[2]);
+            bool dark = i >= 1000 && i < back;
+            db_control_lines(&s.control, lines, dark ? 2 : 4);
+        }
+        db_control_tick(&s.control, &in, &s.out);
+        if (i + 1 == back) {
+            accepted_at_back = s.control.fusion.station[1].accepted;
+        }
+    }
+    CHECK(s.control.estimator.status == DB_POSE_ESTIMATOR_TRACKING, "station back: still tracking");
+    return s.control.fusion.station[1].accepted - accepted_at_back;
+}
+
+static void test_station_back_on_air_settles(void) {
+    uint32_t fused = _station_back_fused(1000, DB_CONTROL_STATION_SETTLE_TICKS);
+    CHECK(fused == 0, "back after 10 s: its lines left out while it settles, %u fused", fused);
+    fused = _station_back_fused(1000, DB_CONTROL_STATION_SETTLE_TICKS + 100);
+    CHECK(fused > 0, "back after 10 s: its lines fused once settled, %u fused", fused);
+    fused = _station_back_fused(30, 200);
+    CHECK(fused > 0, "back after 300 ms: not an absence, %u lines fused", fused);
+}
+
 int main(void) {
     test_batch_seeded();
     test_seed();
@@ -899,6 +936,7 @@ int main(void) {
     test_fix_leaves_out_a_rejected_station();
     test_fusion_record_before_heading_and_on_fallback();
     test_station_dark_at_rest_keeps_the_heading();
+    test_station_back_on_air_settles();
     printf("dotbot_control: %d passed, %d failed\n", _passed, _failed);
     return _failed ? 1 : 0;
 }

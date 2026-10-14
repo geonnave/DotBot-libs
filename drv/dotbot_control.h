@@ -60,6 +60,13 @@
 /// Floor lines one tick can take: four stations, two sweeps each
 #define DB_CONTROL_LINES_MAX (8U)
 
+/// A station with no line for longer than this is absent
+#define DB_CONTROL_STATION_ABSENT_TICKS (50U)  ///< 500 ms
+
+/// Ticks a station's lines are left out once they resume after an absence: a
+/// station back on air sweeps a few mm off for its first seconds
+#define DB_CONTROL_STATION_SETTLE_TICKS (250U)  ///< 2.5 s
+
 /// The advertisement's heading while the estimator has none
 #define DB_CONTROL_DIRECTION_INVALID (-1000)
 
@@ -134,9 +141,9 @@ typedef struct {
 
 /// What the last tick with staged floor lines did with them, and the fix it took
 typedef struct {
-    uint8_t count;                                ///< lines fused
+    uint8_t count;                                ///< lines staged
     uint8_t station_sweep[DB_CONTROL_LINES_MAX];  ///< lh_index << 1 | sweep, per line
-    uint8_t result[DB_CONTROL_LINES_MAX];         ///< db_pose_estimator_result_t, per line
+    uint8_t result[DB_CONTROL_LINES_MAX];         ///< db_pose_estimator_result_t, per line; REJECTED for a settling station's
     float   innovation_mm[DB_CONTROL_LINES_MAX];  ///< signed innovation, NaN when the line was not gated
     float   fix_x;                                ///< photodiode of the tick's fix, mm, when fix_valid
     float   fix_y;                                ///< photodiode of the tick's fix, mm, when fix_valid
@@ -179,6 +186,8 @@ typedef struct {
     bool                       brake_left;                   ///< last brake written
     bool                       brake_right;                  ///< last brake written
     db_control_fusion_record_t last_fusion;                  ///< the last tick that had floor lines staged
+    uint32_t                   station_line_tick[DB_LH2_FUSION_STATIONS];  ///< tick of each station's last line, 0 before its first
+    uint32_t                   station_back_tick[DB_LH2_FUSION_STATIONS];  ///< tick each station's lines resumed after an absence, 0 for never
 } db_control_t;
 
 /// The DotBot v3 gains and limits the app runs with
@@ -240,7 +249,10 @@ bool db_control_fix_due(const db_control_t *control, uint32_t elapsed_ticks);
  * accepted, else the input's solve. When every line is accepted, the fix
  * feeds the steering and the advertisement but not the estimator, since it
  * comes from the same sweeps; when any is rejected, the fix is used as
- * without lines, so its gate and the kidnap check still see the jump. Lines beyond
+ * without lines, so its gate and the kidnap check still see the jump. A
+ * station's lines are left out for DB_CONTROL_STATION_SETTLE_TICKS once they
+ * resume after an absence, but not after its first line; a tick whose lines are
+ * all left out takes the input's solve, as a tick without lines. Lines beyond
  * DB_CONTROL_LINES_MAX are dropped, and a second call before the tick
  * replaces the first.
  *
