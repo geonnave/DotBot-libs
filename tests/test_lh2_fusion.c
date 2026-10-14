@@ -528,6 +528,65 @@ static void test_fusion_seam_step(void) {
     CHECK(fused_error < 5.0f, "and the fused estimate stays within 5 mm of the truth: %.2f mm", fused_error);
 }
 
+//=========================== tests: intersect =================================
+
+static void test_intersect_one_station_is_its_solve(void) {
+    db_lh2_floor_line_t lines[2];
+    double              p[2];
+    _lines_for(_h_a, STATION_A, 1500, 1200, 0, 0, lines);
+    _solve(_h_a, STATION_A, 1500, 1200, 0, 0, p);
+    float x, y;
+    CHECK(db_lh2_fusion_intersect(lines, 2, &x, &y), "one station's pair fixes a point");
+    CHECK(hypot(x - p[0], y - p[1]) < 0.05, "and it is that station's solve: %.3f mm apart", hypot(x - p[0], y - p[1]));
+}
+
+static void test_intersect_two_stations_between_their_solves(void) {
+    // B disagrees with A by about 4 mm
+    db_lh2_floor_line_t lines[4];
+    double              pa[2], pb[2];
+    _lines_for(_h_a, STATION_A, 2000, 1500, 0, 0, &lines[0]);
+    _lines_for(_h_b, STATION_B, 2000, 1500, 3.0, -2.6, &lines[2]);
+    _solve(_h_a, STATION_A, 2000, 1500, 0, 0, pa);
+    _solve(_h_b, STATION_B, 2000, 1500, 3.0, -2.6, pb);
+    float x, y;
+    CHECK(db_lh2_fusion_intersect(lines, 4, &x, &y), "four lines fix a point");
+    double ab   = hypot(pb[0] - pa[0], pb[1] - pa[1]);
+    double t    = ((x - pa[0]) * (pb[0] - pa[0]) + (y - pa[1]) * (pb[1] - pa[1])) / (ab * ab);
+    double side = fabs((x - pa[0]) * (pb[1] - pa[1]) - (y - pa[1]) * (pb[0] - pa[0])) / ab;
+    CHECK(ab > 3.0 && t > 0.2 && t < 0.8 && side < 1.5, "between the two solves: %.2f of the way from A to B, %.2f mm off the segment, solves %.2f mm apart", t, side, ab);
+    // Same lines in another order, and a malformed one among them
+    db_lh2_floor_line_t mixed[5] = { lines[3], lines[0], { .nx = NAN, .ny = 1, .d_mm = 0, .var_mm2 = 1 }, lines[2], lines[1] };
+    float               x2, y2;
+    CHECK(db_lh2_fusion_intersect(mixed, 5, &x2, &y2) && fabsf(x2 - x) < 1e-3f && fabsf(y2 - y) < 1e-3f, "order does not matter and a malformed line is skipped");
+}
+
+static void test_intersect_weights_by_variance(void) {
+    // Two x lines 4 mm apart, the second four times as certain, and one y line
+    db_lh2_floor_line_t lines[3] = {
+        { .nx = 1, .ny = 0, .d_mm = 100, .var_mm2 = 4 },
+        { .nx = 1, .ny = 0, .d_mm = 104, .var_mm2 = 1 },
+        { .nx = 0, .ny = 2, .d_mm = 400, .var_mm2 = 4 },
+    };
+    float x, y;
+    CHECK(db_lh2_fusion_intersect(lines, 3, &x, &y) && fabsf(x - 103.2f) < 1e-3f && fabsf(y - 200.0f) < 1e-3f, "inverse-variance weights, unnormalised normal: (%.3f, %.3f)", x, y);
+}
+
+static void test_intersect_needs_a_crossing(void) {
+    float               x = -1, y = -1;
+    db_lh2_floor_line_t one[1] = { { .nx = 1, .ny = 0, .d_mm = 100, .var_mm2 = 1 } };
+    CHECK(!db_lh2_fusion_intersect(one, 1, &x, &y), "one line");
+    CHECK(!db_lh2_fusion_intersect(one, 0, &x, &y), "no line");
+    float               a          = 4.0f * (float)M_PI / 180.0f;
+    db_lh2_floor_line_t shallow[2] = { { .nx = 1, .ny = 0, .d_mm = 100, .var_mm2 = 1 }, { .nx = cosf(a), .ny = sinf(a), .d_mm = 100, .var_mm2 = 1 } };
+    CHECK(!db_lh2_fusion_intersect(shallow, 2, &x, &y), "lines crossing at 4 deg");
+    a          = 6.0f * (float)M_PI / 180.0f;
+    shallow[1] = (db_lh2_floor_line_t){ .nx = cosf(a), .ny = sinf(a), .d_mm = 100, .var_mm2 = 1 };
+    CHECK(db_lh2_fusion_intersect(shallow, 2, &x, &y), "lines crossing at 6 deg");
+    db_lh2_floor_line_t bad[2] = { { .nx = 1, .ny = 0, .d_mm = 100, .var_mm2 = 0 }, { .nx = 0, .ny = 1, .d_mm = 100, .var_mm2 = 1 } };
+    x                          = -1;
+    CHECK(!db_lh2_fusion_intersect(bad, 2, &x, &y) && x == -1, "a zero-variance line is skipped, leaving one, and the outputs are untouched");
+}
+
 int main(void) {
     test_update_line_needs_tracking();
     test_update_line_moves_along_normal();
@@ -543,6 +602,10 @@ int main(void) {
     test_fusion_corrects_heading_while_driving();
     test_fusion_corrects_heading_spinning_in_place();
     test_fusion_moves_lines_by_their_age();
+    test_intersect_one_station_is_its_solve();
+    test_intersect_two_stations_between_their_solves();
+    test_intersect_weights_by_variance();
+    test_intersect_needs_a_crossing();
     printf("lh2_fusion: %d passed, %d failed\n", _passed, _failed);
     return _failed ? EXIT_FAILURE : EXIT_SUCCESS;
 }

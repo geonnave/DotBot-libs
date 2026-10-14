@@ -7,6 +7,7 @@
  * @copyright Inria, 2026
  */
 #include <math.h>
+#include <stdbool.h>
 #include <stdint.h>
 #include <string.h>
 
@@ -47,4 +48,37 @@ db_pose_estimator_result_t db_lh2_fusion_update(db_lh2_fusion_t *fusion, db_pose
         health->rejected++;
     }
     return result;
+}
+
+bool db_lh2_fusion_intersect(const db_lh2_floor_line_t *lines, uint8_t count, float *x_mm, float *y_mm) {
+    // Normal equations A p = b of sum w (n . p - d)^2, with unit normals
+    float a00 = 0, a01 = 0, a11 = 0, b0 = 0, b1 = 0;
+    for (uint8_t i = 0; i < count; i++) {
+        const db_lh2_floor_line_t *l  = &lines[i];
+        float                      n2 = l->nx * l->nx + l->ny * l->ny;
+        if (!isfinite(n2) || !isfinite(l->d_mm) || !isfinite(l->var_mm2) || !(l->var_mm2 > 0) || !(n2 > 1e-12f)) {
+            continue;
+        }
+        float n  = sqrtf(n2);
+        float nx = l->nx / n, ny = l->ny / n, d = l->d_mm / n;
+        float w  = n2 / l->var_mm2;
+        a00 += w * nx * nx;
+        a01 += w * nx * ny;
+        a11 += w * ny * ny;
+        b0 += w * nx * d;
+        b1 += w * ny * d;
+    }
+    float det  = a00 * a11 - a01 * a01;
+    float half = 0.5f * (a00 + a11);
+    if (!(half > 0) || !(det >= DB_LH2_FUSION_CROSS_MIN_SIN2 * half * half)) {
+        return false;
+    }
+    float x = (a11 * b0 - a01 * b1) / det;
+    float y = (a00 * b1 - a01 * b0) / det;
+    if (!isfinite(x) || !isfinite(y)) {
+        return false;
+    }
+    *x_mm = x;
+    *y_mm = y;
+    return true;
 }

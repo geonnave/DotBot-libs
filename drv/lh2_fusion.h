@@ -20,6 +20,7 @@
  * @}
  */
 
+#include <stdbool.h>
 #include <stdint.h>
 
 #include "lh2_geometry.h"
@@ -33,6 +34,10 @@
 /// Squared Mahalanobis distance above which a line is rejected: chi-square,
 /// 1 degree of freedom, 99.9 %
 #define DB_LH2_FUSION_GATE (10.83f)
+
+/// sin^2 of the smallest crossing angle, 5 deg, of two equally weighted lines
+/// that still fixes a point
+#define DB_LH2_FUSION_CROSS_MIN_SIN2 (0.00759612f)
 
 _Static_assert(DB_LH2_FUSION_STATIONS == DB_LH2_GEOMETRY_STATIONS, "one health record per station the geometry knows");
 
@@ -71,5 +76,20 @@ void db_lh2_fusion_init(db_lh2_fusion_t *fusion);
  * @return  what the estimator did with the line
  */
 db_pose_estimator_result_t db_lh2_fusion_update(db_lh2_fusion_t *fusion, db_pose_estimator_t *est, const db_lh2_floor_line_t *line);
+
+/**
+ * @brief   The photodiode as the point nearest every floor line, each weighted by 1 / var_mm2
+ *
+ * Malformed lines are skipped. Fails when the lines left do not cross at
+ * 5 deg or more (DB_LH2_FUSION_CROSS_MIN_SIN2), as with one line or only parallel ones.
+ *
+ * @param[in]   lines   Floor lines, of any stations
+ * @param[in]   count   Lines in lines
+ * @param[out]  x_mm    Photodiode, frame axes
+ * @param[out]  y_mm    Photodiode, frame axes
+ *
+ * @return  true if the point was set
+ */
+bool db_lh2_fusion_intersect(const db_lh2_floor_line_t *lines, uint8_t count, float *x_mm, float *y_mm);
 
 #endif
